@@ -38,41 +38,7 @@ brew install ffmpeg
 
 `.env`、`.venv`、`node_modules`、`.next`、`models` は git 管理外です。秘密情報やモデルファイルはコミットしないでください。
 
-## 最短起動: モデルなしで動作確認
-
-まず画面とAPI接続だけ確認したい場合は、STT/LLMをモックで起動します。モデルのダウンロードは不要です。
-
-### 1. APIを起動
-
-```bash
-cd mimemo-api
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[api]"
-cp .env.example .env
-MIMEMO_STT_BACKEND=mock MIMEMO_LLM_BACKEND=mock .venv/bin/uvicorn mimemo_ai.api:app --host 127.0.0.1 --port 8000
-```
-
-別ターミナルでヘルスチェックします。
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-### 2. ダッシュボードを起動
-
-```bash
-cd mimemo-dashboard
-npm install
-cp .env.example .env.local
-npm run dev
-```
-
-ブラウザで `http://localhost:3000` を開きます。
-
-`mimemo-dashboard/.env.local` の `NEXT_PUBLIC_MIMEMO_API_BASE_URL` が `http://127.0.0.1:8000` になっていれば、ダッシュボードはローカルAPIへ接続します。
-
-## 実AIで動かす
+## 起動手順
 
 実際に文字起こしと要約を行う場合は、API側にSTTとLLMの実行環境を用意します。
 
@@ -234,12 +200,6 @@ ffmpeg -version
 
 ```bash
 ./scripts/start_llama_server.sh
-```
-
-モデルなしで疎通確認だけしたい場合は、APIをモックで起動してください。
-
-```bash
-MIMEMO_STT_BACKEND=mock MIMEMO_LLM_BACKEND=mock .venv/bin/uvicorn mimemo_ai.api:app --host 127.0.0.1 --port 8000
 ```
 
 ### ブラウザ録音が始まらない
