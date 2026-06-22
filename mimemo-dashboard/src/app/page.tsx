@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Badge,
   Box,
@@ -353,7 +353,6 @@ export default function HomePage() {
   const [selectedFileName, setSelectedFileName] = useState("");
   const [apiTranscript, setApiTranscript] = useState<ApiSegment[]>([]);
   const [apiSummary, setApiSummary] = useState<MinutesResponse | null>(null);
-  const audioInputRef = useRef<HTMLInputElement>(null);
 
   const activeMeeting = meetings.find((meeting) => meeting.id === activeMeetingId) ?? meetings[0];
 
@@ -429,8 +428,7 @@ export default function HomePage() {
         <Sidebar activeTab={activeTab} onChange={setActiveTab} />
 
         <Box as="main" flex="1" minW={0} px={{ base: 4, md: 8 }} py={{ base: 4, md: 6 }}>
-          <TopBar activeMeeting={activeMeeting} onUploadClick={() => audioInputRef.current?.click()} uploadDisabled={uploadStatus === "processing"} />
-          <input ref={audioInputRef} type="file" accept={AUDIO_ACCEPT} hidden onChange={handleAudioInputChange} />
+          <TopBar activeMeeting={activeMeeting} onUploadChange={handleAudioInputChange} uploadDisabled={uploadStatus === "processing"} />
 
           <Grid templateColumns={{ base: "1fr", xl: "minmax(0, 1fr) 320px" }} gap={5} alignItems="start">
             <Box minW={0}>
@@ -594,11 +592,11 @@ function Sidebar({ activeTab, onChange }: { activeTab: AppTab; onChange: (tab: A
 
 function TopBar({
   activeMeeting,
-  onUploadClick,
+  onUploadChange,
   uploadDisabled
 }: {
   activeMeeting: Meeting;
-  onUploadClick: () => void;
+  onUploadChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   uploadDisabled: boolean;
 }) {
   return (
@@ -619,10 +617,27 @@ function TopBar({
       </Box>
 
       <HStack gap={2}>
-        <Button variant="outline" colorPalette="gray" size="sm" onClick={onUploadClick} disabled={uploadDisabled}>
-          <Upload size={16} />
-          音声を追加
-        </Button>
+        <Box position="relative" display="inline-flex">
+          <Button variant="outline" colorPalette="gray" size="sm" disabled={uploadDisabled} pointerEvents="none">
+            <Upload size={16} />
+            音声を追加
+          </Button>
+          <Input
+            aria-label="音声を追加"
+            type="file"
+            accept={AUDIO_ACCEPT}
+            position="absolute"
+            inset="0"
+            w="100%"
+            h="100%"
+            opacity="0"
+            p="0"
+            border="0"
+            cursor={uploadDisabled ? "not-allowed" : "pointer"}
+            disabled={uploadDisabled}
+            onChange={onUploadChange}
+          />
+        </Box>
         <Button colorPalette="teal" size="sm">
           <Plus size={16} />
           新規会議
