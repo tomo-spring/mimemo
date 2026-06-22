@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Box,
@@ -46,12 +46,15 @@ import {
   Square,
   Upload,
   Users,
-  Wand2
+  Wand2,
+  X
 } from "lucide-react";
 
 type AppTab = "record" | "minutes" | "summary" | "tasks" | "library" | "settings";
 type RecordingStatus = "recording" | "paused" | "stopped";
 type UploadStatus = "idle" | "processing" | "done" | "error";
+type WebRecorderStatus = "idle" | "recording" | "stopping";
+type RecorderSource = "pc" | "meet";
 
 type Meeting = {
   id: string;
@@ -113,7 +116,8 @@ type ApiErrorResponse = {
 };
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_MIMEMO_API_BASE_URL ?? "http://127.0.0.1:8000";
-const AUDIO_ACCEPT = "audio/*,.aac,.flac,.m4a,.mp3,.wav,.webm";
+const AUDIO_ACCEPT = ".wav,.mp3,audio/wav,audio/x-wav,audio/mpeg";
+const SUPPORTED_AUDIO_EXTENSIONS = [".wav", ".mp3"];
 
 const navTabs: NavTab[] = [
   { value: "record", label: "録音", description: "会議を取り込む", icon: Mic },
@@ -337,10 +341,116 @@ function buildShareText(summary: MinutesResponse, decisionTexts: string[]) {
   return cleanStrings([overview, decisionSummary, taskSummary]).join(" ");
 }
 
+function isSupportedAudioFile(file: File) {
+  const fileName = file.name.toLowerCase();
+
+  return SUPPORTED_AUDIO_EXTENSIONS.some((extension) => fileName.endsWith(extension));
+}
+
+function getRecorderMimeType() {
+  if (typeof MediaRecorder === "undefined") return "";
+
+  const candidates = ["audio/webm;codecs=opus", "audio/webm"];
+
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? "";
+}
+
+function recordingFileName(source: RecorderSource) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const sourceLabel = source === "meet" ? "google-meet" : "pc";
+
+  return `mimemo-${sourceLabel}-${timestamp}.wav`;
+}
+
+async function recordingBlobToWavFile(blob: Blob, source: RecorderSource) {
+  const AudioContextConstructor =
+    window.AudioContext ?? (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+  if (!AudioContextConstructor) {
+    throw new Error("WAV変換を開始できません。");
+  }
+
+  const audioContext = new AudioContextConstructor();
+
+  try {
+    const audioBuffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
+    const wavBlob = audioBufferToWavBlob(audioBuffer);
+
+    return new File([wavBlob], recordingFileName(source), { type: "audio/wav" });
+  } finally {
+    await audioContext.close().catch(() => undefined);
+  }
+}
+
+function audioBufferToWavBlob(audioBuffer: AudioBuffer) {
+  const channelCount = Math.min(audioBuffer.numberOfChannels, 2);
+  const bytesPerSample = 2;
+  const blockAlign = channelCount * bytesPerSample;
+  const dataLength = audioBuffer.length * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(buffer);
+  let offset = 0;
+
+  offset = writeAscii(view, offset, "RIFF");
+  view.setUint32(offset, 36 + dataLength, true);
+  offset += 4;
+  offset = writeAscii(view, offset, "WAVE");
+  offset = writeAscii(view, offset, "fmt ");
+  view.setUint32(offset, 16, true);
+  offset += 4;
+  view.setUint16(offset, 1, true);
+  offset += 2;
+  view.setUint16(offset, channelCount, true);
+  offset += 2;
+  view.setUint32(offset, audioBuffer.sampleRate, true);
+  offset += 4;
+  view.setUint32(offset, audioBuffer.sampleRate * blockAlign, true);
+  offset += 4;
+  view.setUint16(offset, blockAlign, true);
+  offset += 2;
+  view.setUint16(offset, bytesPerSample * 8, true);
+  offset += 2;
+  offset = writeAscii(view, offset, "data");
+  view.setUint32(offset, dataLength, true);
+  offset += 4;
+
+  const channelData = Array.from({ length: channelCount }, (_, index) => audioBuffer.getChannelData(index));
+
+  for (let sampleIndex = 0; sampleIndex < audioBuffer.length; sampleIndex += 1) {
+    for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+      const sample = Math.max(-1, Math.min(1, channelData[channelIndex][sampleIndex]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += bytesPerSample;
+    }
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function writeAscii(view: DataView, offset: number, value: string) {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index));
+  }
+
+  return offset + value.length;
+}
+
+function recorderStatusLabel(status: WebRecorderStatus) {
+  if (status === "recording") return "録音中";
+  if (status === "stopping") return "処理準備中";
+  return "待機";
+}
+
+function recorderSourceLabel(source: RecorderSource | null) {
+  if (source === "pc") return "このPC";
+  if (source === "meet") return "Google Meet";
+  return "未選択";
+}
+
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<AppTab>("record");
   const [activeMeetingId, setActiveMeetingId] = useState(meetings[0].id);
-  const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>("recording");
+  const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>("stopped");
   const [tasks, setTasks] = useState(initialTasks);
   const [taskFilter, setTaskFilter] = useState<"all" | "open" | "done">("all");
   const [libraryQuery, setLibraryQuery] = useState("");
@@ -353,6 +463,13 @@ export default function HomePage() {
   const [selectedFileName, setSelectedFileName] = useState("");
   const [apiTranscript, setApiTranscript] = useState<ApiSegment[]>([]);
   const [apiSummary, setApiSummary] = useState<MinutesResponse | null>(null);
+  const [meetingModalOpen, setMeetingModalOpen] = useState(false);
+  const [webRecorderStatus, setWebRecorderStatus] = useState<WebRecorderStatus>("idle");
+  const [webRecorderSource, setWebRecorderSource] = useState<RecorderSource | null>(null);
+  const [webRecorderError, setWebRecorderError] = useState("");
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
 
   const activeMeeting = meetings.find((meeting) => meeting.id === activeMeetingId) ?? meetings[0];
 
@@ -376,7 +493,21 @@ export default function HomePage() {
     setTasks((current) => current.map((task) => (task.id === id ? { ...task, done: !task.done } : task)));
   }
 
+  useEffect(() => {
+    return () => {
+      stopMediaStream();
+    };
+  }, []);
+
   async function processAudio(file: File) {
+    if (!isSupportedAudioFile(file)) {
+      setSelectedFileName(file.name);
+      setUploadStatus("error");
+      setUploadError("対応音声はWAVとMP3です。");
+      setActiveTab("record");
+      return;
+    }
+
     setSelectedFileName(file.name);
     setUploadStatus("processing");
     setUploadError("");
@@ -414,6 +545,132 @@ export default function HomePage() {
     }
   }
 
+  async function startWebRecording(source: RecorderSource) {
+    if (webRecorderStatus !== "idle") return;
+
+    if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices) {
+      setWebRecorderError("このブラウザでは録音を開始できません。");
+      return;
+    }
+
+    setWebRecorderError("");
+    setUploadError("");
+    setActiveTab("record");
+
+    try {
+      const stream =
+        source === "pc"
+          ? await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+              }
+            })
+          : await navigator.mediaDevices.getDisplayMedia({
+              video: true,
+              audio: true
+            });
+
+      if (source === "meet" && stream.getAudioTracks().length === 0) {
+        stream.getTracks().forEach((track) => track.stop());
+        setWebRecorderError("Google Meetの音声を取得できませんでした。タブ音声を含めて選択してください。");
+        return;
+      }
+
+      const recorderStream = source === "meet" ? new MediaStream(stream.getAudioTracks()) : stream;
+      const mimeType = getRecorderMimeType();
+      const recorder = mimeType ? new MediaRecorder(recorderStream, { mimeType }) : new MediaRecorder(recorderStream);
+
+      recordingChunksRef.current = [];
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordingChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onerror = () => {
+        setWebRecorderError("録音中にエラーが発生しました。");
+        stopWebRecording();
+      };
+      recorder.onstop = () => {
+        void finishWebRecording(source, recorder.mimeType || mimeType || "audio/webm");
+      };
+      stream.getTracks().forEach((track) => {
+        track.addEventListener("ended", () => {
+          if (mediaRecorderRef.current?.state === "recording") {
+            stopWebRecording();
+          }
+        });
+      });
+
+      recorder.start(1000);
+      setMeetingModalOpen(false);
+      setWebRecorderSource(source);
+      setWebRecorderStatus("recording");
+      setRecordingStatus("recording");
+    } catch (error) {
+      stopMediaStream();
+      setWebRecorderStatus("idle");
+      setWebRecorderSource(null);
+      setWebRecorderError(error instanceof Error ? error.message : "録音を開始できませんでした。");
+    }
+  }
+
+  function stopWebRecording() {
+    const recorder = mediaRecorderRef.current;
+
+    if (recorder && recorder.state !== "inactive") {
+      setWebRecorderStatus("stopping");
+      recorder.stop();
+      return;
+    }
+
+    stopMediaStream();
+    setWebRecorderStatus("idle");
+    setWebRecorderSource(null);
+  }
+
+  async function finishWebRecording(source: RecorderSource, mimeType: string) {
+    const chunks = recordingChunksRef.current;
+    recordingChunksRef.current = [];
+    mediaRecorderRef.current = null;
+    stopMediaStream();
+
+    if (chunks.length === 0) {
+      setWebRecorderStatus("idle");
+      setWebRecorderSource(null);
+      setRecordingStatus("stopped");
+      setWebRecorderError("録音データが空です。");
+      return;
+    }
+
+    const blob = new Blob(chunks, { type: mimeType });
+    let file: File;
+
+    try {
+      file = await recordingBlobToWavFile(blob, source);
+    } catch (error) {
+      setWebRecorderStatus("idle");
+      setWebRecorderSource(null);
+      setRecordingStatus("stopped");
+      setWebRecorderError(error instanceof Error ? error.message : "WAV変換に失敗しました。");
+      return;
+    }
+
+    setRecordingStatus("stopped");
+    await processAudio(file);
+    setWebRecorderStatus("idle");
+    setWebRecorderSource(null);
+  }
+
+  function stopMediaStream() {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  }
+
   function handleAudioInputChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     if (file) {
@@ -428,7 +685,21 @@ export default function HomePage() {
         <Sidebar activeTab={activeTab} onChange={setActiveTab} />
 
         <Box as="main" flex="1" minW={0} px={{ base: 4, md: 8 }} py={{ base: 4, md: 6 }}>
-          <TopBar activeMeeting={activeMeeting} onUploadChange={handleAudioInputChange} uploadDisabled={uploadStatus === "processing"} />
+          <TopBar
+            activeMeeting={activeMeeting}
+            onUploadChange={handleAudioInputChange}
+            uploadDisabled={uploadStatus === "processing" || webRecorderStatus !== "idle"}
+            onNewMeetingClick={() => setMeetingModalOpen(true)}
+            newMeetingDisabled={uploadStatus === "processing" || webRecorderStatus !== "idle"}
+          />
+          <NewMeetingModal
+            open={meetingModalOpen}
+            recorderStatus={webRecorderStatus}
+            recorderError={webRecorderError}
+            onClose={() => setMeetingModalOpen(false)}
+            onRecordOnPc={() => void startWebRecording("pc")}
+            onRecordGoogleMeet={() => void startWebRecording("meet")}
+          />
 
           <Grid templateColumns={{ base: "1fr", xl: "minmax(0, 1fr) 320px" }} gap={5} alignItems="start">
             <Box minW={0}>
@@ -472,7 +743,10 @@ export default function HomePage() {
                     selectedFileName={selectedFileName}
                     apiBaseUrl={API_BASE_URL}
                     transcript={apiTranscript}
-                    onUpload={processAudio}
+                    webRecorderStatus={webRecorderStatus}
+                    webRecorderSource={webRecorderSource}
+                    webRecorderError={webRecorderError}
+                    onStopWebRecording={stopWebRecording}
                     onMeetingChange={setActiveMeetingId}
                     onToggleRecording={() =>
                       setRecordingStatus((current) => (current === "recording" ? "paused" : "recording"))
@@ -593,11 +867,15 @@ function Sidebar({ activeTab, onChange }: { activeTab: AppTab; onChange: (tab: A
 function TopBar({
   activeMeeting,
   onUploadChange,
-  uploadDisabled
+  uploadDisabled,
+  onNewMeetingClick,
+  newMeetingDisabled
 }: {
   activeMeeting: Meeting;
   onUploadChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   uploadDisabled: boolean;
+  onNewMeetingClick: () => void;
+  newMeetingDisabled: boolean;
 }) {
   return (
     <Flex
@@ -638,7 +916,7 @@ function TopBar({
             onChange={onUploadChange}
           />
         </Box>
-        <Button colorPalette="teal" size="sm">
+        <Button colorPalette="teal" size="sm" onClick={onNewMeetingClick} disabled={newMeetingDisabled}>
           <Plus size={16} />
           新規会議
         </Button>
@@ -646,6 +924,80 @@ function TopBar({
           <Bell size={18} />
         </IconButton>
       </HStack>
+    </Flex>
+  );
+}
+
+function NewMeetingModal({
+  open,
+  recorderStatus,
+  recorderError,
+  onClose,
+  onRecordOnPc,
+  onRecordGoogleMeet
+}: {
+  open: boolean;
+  recorderStatus: WebRecorderStatus;
+  recorderError: string;
+  onClose: () => void;
+  onRecordOnPc: () => void;
+  onRecordGoogleMeet: () => void;
+}) {
+  if (!open) return null;
+
+  const isBusy = recorderStatus !== "idle";
+
+  return (
+    <Flex position="fixed" inset="0" zIndex="modal" bg="rgba(15, 23, 42, 0.38)" align="center" justify="center" px={4}>
+      <Box role="dialog" aria-modal="true" bg="white" borderRadius="lg" border="1px solid" borderColor="gray.200" boxShadow="0 24px 80px rgba(15, 23, 42, 0.22)" w="100%" maxW="520px" p={{ base: 4, md: 5 }}>
+        <HStack justify="space-between" align="flex-start" mb={4}>
+          <Box>
+            <Heading as="h2" size="lg" fontWeight="500">
+              新規会議
+            </Heading>
+            <Text fontSize="sm" color="gray.500" mt={1}>
+              録音元を選択
+            </Text>
+          </Box>
+          <IconButton aria-label="閉じる" variant="ghost" colorPalette="gray" size="sm" onClick={onClose}>
+            <X size={18} />
+          </IconButton>
+        </HStack>
+
+        <Stack gap={3}>
+          <Button h="auto" py={4} justifyContent="flex-start" variant="outline" colorPalette="gray" disabled={isBusy} onClick={onRecordOnPc}>
+            <Circle size="38px" bg="teal.50" color="teal.600">
+              <Mic size={18} />
+            </Circle>
+            <Box textAlign="left">
+              <Text fontSize="sm">このPCで録音</Text>
+              <Text fontSize="xs" color="gray.500" mt={1}>
+                マイク入力
+              </Text>
+            </Box>
+          </Button>
+
+          <Button h="auto" py={4} justifyContent="flex-start" variant="outline" colorPalette="gray" disabled={isBusy} onClick={onRecordGoogleMeet}>
+            <Circle size="38px" bg="blue.50" color="blue.600">
+              <CalendarDays size={18} />
+            </Circle>
+            <Box textAlign="left">
+              <Text fontSize="sm">Google Meetで録音</Text>
+              <Text fontSize="xs" color="gray.500" mt={1}>
+                タブ音声
+              </Text>
+            </Box>
+          </Button>
+        </Stack>
+
+        {recorderError ? (
+          <Box mt={4} p={3} borderRadius="md" bg="red.50" border="1px solid" borderColor="red.100">
+            <Text fontSize="sm" color="red.700" lineHeight="1.6">
+              {recorderError}
+            </Text>
+          </Box>
+        ) : null}
+      </Box>
     </Flex>
   );
 }
@@ -658,7 +1010,10 @@ function RecordTab({
   selectedFileName,
   apiBaseUrl,
   transcript,
-  onUpload,
+  webRecorderStatus,
+  webRecorderSource,
+  webRecorderError,
+  onStopWebRecording,
   onMeetingChange,
   onToggleRecording
 }: {
@@ -669,13 +1024,17 @@ function RecordTab({
   selectedFileName: string;
   apiBaseUrl: string;
   transcript: ApiSegment[];
-  onUpload: (file: File) => Promise<void>;
+  webRecorderStatus: WebRecorderStatus;
+  webRecorderSource: RecorderSource | null;
+  webRecorderError: string;
+  onStopWebRecording: () => void;
   onMeetingChange: (id: string) => void;
   onToggleRecording: () => void;
 }) {
   const isRecording = recordingStatus === "recording";
   const isStopped = recordingStatus === "stopped";
-  const isProcessing = uploadStatus === "processing";
+  const isWebRecording = webRecorderStatus === "recording";
+  const isWebStopping = webRecorderStatus === "stopping";
   const visibleTranscript =
     transcript.length > 0
       ? transcript.map((segment) => ({
@@ -695,9 +1054,9 @@ function RecordTab({
     <Stack gap={5}>
       <SimpleGrid columns={{ base: 1, md: 3 }} gap={4}>
         <MetricCard
-          label="録音時間"
-          value={activeMeeting.length}
-          detail={recordingStatus === "recording" ? "録音中" : recordingStatus === "paused" ? "一時停止中" : "停止済み"}
+          label="録音状態"
+          value={recorderStatusLabel(webRecorderStatus)}
+          detail={webRecorderSource ? recorderSourceLabel(webRecorderSource) : activeMeeting.length}
         />
         <MetricCard
           label="文字起こし"
@@ -719,40 +1078,29 @@ function RecordTab({
               </Badge>
             </HStack>
             <Heading as="h2" size="lg" fontWeight="500">
-              音声アップロード
+              音声取り込み
             </Heading>
           </Box>
 
-          <Box w={{ base: "100%", md: "380px" }}>
-            <Input
-              aria-label="音声ファイル"
-              type="file"
-              accept={AUDIO_ACCEPT}
-              bg="white"
-              borderColor="gray.200"
-              p={1.5}
-              disabled={isProcessing}
-              onChange={(event) => {
-                const file = event.currentTarget.files?.[0];
-                if (file) {
-                  void onUpload(file);
-                }
-                event.currentTarget.value = "";
-              }}
-            />
-          </Box>
+          {isWebRecording || isWebStopping ? (
+            <Button colorPalette="pink" variant="subtle" disabled={isWebStopping} onClick={onStopWebRecording}>
+              <Square size={15} />
+              {isWebStopping ? "停止中" : "録音停止"}
+            </Button>
+          ) : null}
         </Flex>
 
-        <SimpleGrid columns={{ base: 1, md: 3 }} gap={3} mt={4}>
+        <SimpleGrid columns={{ base: 1, md: 4 }} gap={3} mt={4}>
           <InfoRow label="API" text={apiBaseUrl} />
-          <InfoRow label="ファイル" text={selectedFileName || "未選択"} />
+          <InfoRow label="録音元" text={recorderSourceLabel(webRecorderSource)} />
+          <InfoRow label="ファイル" text={selectedFileName || recorderStatusLabel(webRecorderStatus)} />
           <InfoRow label="結果" text={transcript.length > 0 ? `${transcript.length}セグメント` : uploadStatusDetail(uploadStatus)} />
         </SimpleGrid>
 
-        {uploadError ? (
+        {uploadError || webRecorderError ? (
           <Box mt={4} p={3} borderRadius="md" bg="red.50" border="1px solid" borderColor="red.100">
             <Text fontSize="sm" color="red.700" lineHeight="1.6">
-              {uploadError}
+              {uploadError || webRecorderError}
             </Text>
           </Box>
         ) : null}

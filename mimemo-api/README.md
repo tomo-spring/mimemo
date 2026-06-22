@@ -66,6 +66,8 @@ uvicorn mimemo_ai.api:app --host 127.0.0.1 --port 8000
 curl http://127.0.0.1:8000/health
 ```
 
+対応音声は WAV / MP3 です。
+
 音声から議事録:
 
 ```bash

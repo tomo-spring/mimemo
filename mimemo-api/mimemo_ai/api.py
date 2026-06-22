@@ -28,6 +28,7 @@ class SummarizeRequest(BaseModel):
 settings = Settings.from_env()
 pipeline = MinutesPipeline(settings)
 app = FastAPI(title="mimemo AI API", version="0.1.0")
+ALLOWED_AUDIO_SUFFIXES = {".wav", ".mp3"}
 
 allowed_origins = [
     origin.strip()
@@ -65,6 +66,8 @@ async def transcribe(file: UploadFile = File(...)) -> dict[str, Any]:
         input_path = await _save_upload(file)
         segments = pipeline.transcribe_file(input_path)
         return {"segments": [segment.to_dict() for segment in segments]}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -83,12 +86,17 @@ async def minutes(file: UploadFile = File(...)) -> dict[str, Any]:
     try:
         input_path = await _save_upload(file)
         return pipeline.create_minutes(input_path)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 async def _save_upload(file: UploadFile) -> Path:
-    suffix = Path(file.filename or "audio").suffix or ".audio"
+    suffix = Path(file.filename or "audio").suffix.lower()
+    if suffix not in ALLOWED_AUDIO_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Only WAV and MP3 audio files are supported.")
+
     tmp = tempfile.NamedTemporaryFile(prefix="mimemo-upload-", suffix=suffix, delete=False)
     with tmp:
         while chunk := await file.read(1024 * 1024):
