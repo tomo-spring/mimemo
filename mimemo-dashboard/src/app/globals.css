@@ -1,0 +1,24 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f6f8fb;
+  color: #1f2937;
+  font-family:
+    Inter,
+    "Noto Sans JP",
+    "Hiragino Sans",
+    "Yu Gothic",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+}

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mimemo-ai"
+version = "0.1.0"
+description = "Edge-first Japanese meeting minutes AI pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "mimemo" }]
+dependencies = []
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115",
+  "python-multipart>=0.0.9",
+  "uvicorn[standard]>=0.30",
+]
+faster-whisper = [
+  "faster-whisper>=1.1",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+mimemo-ai = "mimemo_ai.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mimemo_ai*"]
